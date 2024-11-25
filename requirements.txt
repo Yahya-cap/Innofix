@@ -1,0 +1,7 @@
+generative-ai-hub-sdk
+hdbcli
+hana_ml
+generative-ai-hub-sdk[langchain]
+tiktoken
+python-docx
+flask
