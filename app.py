@@ -1,9 +1,136 @@
 import base64
-from flask import Flask, request, jsonify
 from gen_ai_hub.proxy.native.openai import chat
 import requests
+from flask import Flask, request, jsonify
+import hdbcli
+from hdbcli import dbapi
+import hana_ml
+from gen_ai_hub.proxy.core.proxy_clients import get_proxy_client
+from gen_ai_hub.proxy.native.openai import embeddings
+from langchain.prompts import PromptTemplate
+import tiktoken
+from gen_ai_hub.proxy.langchain.openai import ChatOpenAI
 
+
+
+# Database connection setup
+# Import necessary modules, and define a function to query an LLM with a formatted prompt and vector-based context
+# Create a prompt template
+promptTemplate_fstring = """
+You are an SAP HANA Cloud expert.
+You are provided multiple context items that are related to the prompt you have to answer.
+Use the following pieces of context to answer the question at the end.
+Context:
+{context}
+Question:
+{query}
+"""
+
+promptTemplate = PromptTemplate.from_template(promptTemplate_fstring)
+
+proxy_client = get_proxy_client('gen-ai-hub')  # for an AI Core proxy
+ 
 app = Flask(__name__)
+cc = dbapi.connect(
+    address='794d7a51-4a96-4b97-a476-dacb3a0440b4.hna2.prod-eu10.hanacloud.ondemand.com',
+    port=443,
+    user='CC4AFC2F627D4914A44DD6C261D7FF8D_ERSTH1BXP245L82B8489DZI58_RT',
+    password='Ya2Eyj6fRxkXOV7lIA2no79-1YmCUV0rF.gDA71X-Kgh..Q6RnS2Ll8xTxpr4A6BLCVg418g1bCishkKMOzEy0xnT_qIzp4lexALzL-S230emqkBsx-N.kUai5.y2R2q',
+    encrypt=True
+)
+cursor = cc.cursor()
+
+print("Database connection established.")
+
+# Function to get embedding for a query
+def get_embedding(input, model="text-embedding-ada-002") -> str:
+    response = embeddings.create(
+        model_name=model,
+        input=input
+    )
+    return response.data[0].embedding
+
+# Vector search function
+def run_vector_search(query: str, metric="COSINE_SIMILARITY", k=3):
+    sort = 'DESC' if metric != 'L2DISTANCE' else 'ASC'
+    query_vector = get_embedding(query)
+    sql = f'''
+    SELECT TOP {k} "NC_NUMBER", "DESCRIPTION", "VECTOR_STR",
+        {metric}("VECTOR_STR", TO_REAL_VECTOR('{query_vector}')) AS similarity_score
+    FROM "DEFECTS_TABLE_FINAL"
+    ORDER BY similarity_score {sort}
+    '''
+    cursor.execute(sql)
+    results = cursor.fetchall()
+    return [(row[0], row[1]) for row in results]  # Return NC_NUMBER and DESCRIPTION
+
+# Retrieve default code for NC_NUMBER
+def get_default_code(nc_number):
+    sql = '''
+    SELECT "DEFAULT_CODE"
+    FROM "DEFECTS_TABLE_FINAL"
+    WHERE "NC_NUMBER" = ?
+    '''
+    cursor.execute(sql, (nc_number,))
+    result = cursor.fetchone()
+    return result[0] if result else None
+
+# Retrieve repair procedure for DEFAULT_CODE
+def get_repair_procedure(default_code):
+    sql = '''
+    SELECT "REPAIR_PROCEDURE"
+    FROM "REPAIR_TABLE"
+    WHERE "CODE" = ?
+    '''
+    cursor.execute(sql, (default_code,))
+    result = cursor.fetchone()
+    return result[0] if result else "No repair procedure found."
+
+# New endpoint to process image and description
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    try:
+        # Parse request data
+        data = request.get_json()
+        if not data or 'image' not in data or 'description' not in data:
+            return jsonify({"error": "Both 'image' and 'description' must be provided"}), 400
+        
+        # Extract image and description
+        encoded_image = data['image']
+        description = data['description']
+        
+        # Decode the Base64 image (optional: save or process it)
+        try:
+            pass
+            #image_data = base64.b64decode(encoded_image)
+        except Exception as e:
+            return jsonify({"error": f"Invalid Base64 image: {str(e)}"}), 400
+
+
+        # Perform vector search
+        similar_ncs = run_vector_search(description, k=3)
+        if not similar_ncs:
+            return jsonify({"error": "No similar NCs found"}), 404
+
+        # Extract the most similar NC's default code
+        first_nc_number = similar_ncs[0][0]
+        default_code = get_default_code(first_nc_number)
+        if not default_code:
+            return jsonify({"error": f"No default code found for NC {first_nc_number}"}), 404
+        
+        # Retrieve the repair procedure for the default code
+        repair_procedure = get_repair_procedure(default_code)
+        
+        # Construct the response
+        response = {
+            "similar_NCs": [nc[0] for nc in similar_ncs],  # Only NC_NUMBER
+            "repair_procedure": repair_procedure
+        }
+        return jsonify(response)
+    
+    except Exception as e:
+        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
 
 def create_image_prompt(image_url: str, text_prompt: str) -> list:
     """Create a prompt for the model with both image URL and text description."""
