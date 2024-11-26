@@ -11,7 +11,7 @@ from langchain.prompts import PromptTemplate
 import tiktoken
 from gen_ai_hub.proxy.langchain.openai import ChatOpenAI
 from gen_ai_hub.proxy.native.openai import chat
-
+import os
 
 # Database connection setup
 # Import necessary modules, and define a function to query an LLM with a formatted prompt and vector-based context
@@ -30,6 +30,7 @@ promptTemplate = PromptTemplate.from_template(promptTemplate_fstring)
 
 proxy_client = get_proxy_client('gen-ai-hub')  # for an AI Core proxy
  
+port = int(os.environ.get('PORT', 3000))
 app = Flask(__name__)
 cc = dbapi.connect(
     address='794d7a51-4a96-4b97-a476-dacb3a0440b4.hna2.prod-eu10.hanacloud.ondemand.com',
@@ -233,4 +234,4 @@ def handle_request():
 
 if __name__ == '__main__':
     # Run the Flask app
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=port, debug=True)
