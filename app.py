@@ -10,7 +10,7 @@ from gen_ai_hub.proxy.native.openai import embeddings
 from langchain.prompts import PromptTemplate
 import tiktoken
 from gen_ai_hub.proxy.langchain.openai import ChatOpenAI
-
+from gen_ai_hub.proxy.native.openai import chat
 
 
 # Database connection setup
@@ -52,17 +52,27 @@ def get_embedding(input, model="text-embedding-ada-002") -> str:
 
 # Vector search function
 def run_vector_search(query: str, metric="COSINE_SIMILARITY", k=3):
-    sort = 'DESC' if metric != 'L2DISTANCE' else 'ASC'
+    """Recherche dans DEFECTS_TABLE_FINAL pour les enregistrements les plus similaires."""
+    if metric == 'L2DISTANCE':
+        sort = 'ASC'
+    else:
+        sort = 'DESC'
+   
     query_vector = get_embedding(query)
-    sql = f'''
+   
+    sql = '''
     SELECT TOP {k} "NC_NUMBER", "DESCRIPTION", "VECTOR_STR",
-        {metric}("VECTOR_STR", TO_REAL_VECTOR('{query_vector}')) AS similarity_score
+        {metric}("VECTOR_STR", TO_REAL_VECTOR('{qv}')) AS similarity_score
     FROM "DEFECTS_TABLE_FINAL"
     ORDER BY similarity_score {sort}
-    '''
+    '''.format(k=k, metric=metric, qv=query_vector, sort=sort)
+   
     cursor.execute(sql)
     results = cursor.fetchall()
-    return [(row[0], row[1]) for row in results]  # Return NC_NUMBER and DESCRIPTION
+   
+    return [(row[0], row[1], row[2], row[3]) for row in results]
+
+
 
 # Retrieve default code for NC_NUMBER
 def get_default_code(nc_number):
@@ -85,6 +95,37 @@ def get_repair_procedure(default_code):
     cursor.execute(sql, (default_code,))
     result = cursor.fetchone()
     return result[0] if result else "No repair procedure found."
+
+
+ 
+def generate_text_with_mistral(description, context):
+    """
+    Generates a repair procedure based on a user's description of a defect
+    and a given repair context.
+    
+    Parameters:
+        description (str): A description of the defect provided by the user.
+        context (str): The initial repair procedure or context to work from.
+    
+    Returns:
+        str: A professionally reformulated repair procedure.
+    """
+    messages = [
+        {"role": "system", "content": "You are an expert in aircraft maintenance and repair."},
+        {"role": "user", "content": f"A user has described a defect as follows: '{description}'. "
+                                     f"Given this defect, suggest a repair procedure. "
+                                     f"Here is some initial repair context: {context}. "
+                                     "Please provide a clear and professional repair procedure."}
+    ]
+
+    response = chat.completions.create(
+        model_name="mistralai--mistral-large-instruct",
+        messages=messages
+    )
+
+    return response.to_dict()["choices"][0]["message"]["content"]
+
+
 
 # New endpoint to process image and description
 @app.route('/analyze', methods=['POST'])
@@ -117,17 +158,21 @@ def analyze():
         default_code = get_default_code(first_nc_number)
         if not default_code:
             return jsonify({"error": f"No default code found for NC {first_nc_number}"}), 404
-        
+
         # Retrieve the repair procedure for the default code
         repair_procedure = get_repair_procedure(default_code)
-        
+        suggested_procedure = generate_text_with_mistral(repair_procedure,description)
         # Construct the response
         response = {
-            "similar_NCs": [nc[0] for nc in similar_ncs],  # Only NC_NUMBER
+            "suggested repair procedure": suggested_procedure,
+            "similar_NCs": [
+                {"NC_NUMBER": nc[0], "similarity_score": int(nc[3] * 100)} for nc in similar_ncs
+            ],  # NC_NUMBER and similarity score as a percentage
             "repair_procedure": repair_procedure
         }
+
         return jsonify(response)
-    
+
     except Exception as e:
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
